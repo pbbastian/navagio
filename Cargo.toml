@@ -1,0 +1,9 @@
+[package]
+name = "navagio"
+version = "0.1.0"
+authors = ["Peter Bay Bastian <peter.bastian@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+crossbeam = "0.7.3"
+num_cpus = "1.13.0"
