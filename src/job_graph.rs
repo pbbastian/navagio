@@ -59,6 +59,11 @@ struct JobData<'a> {
 unsafe impl<'a> Send for JobData<'a> {}
 unsafe impl<'a> Sync for JobData<'a> {}
 
+enum LastAccess {
+    Ref(Option<usize>, Vec<usize>),
+    Mut(usize),
+}
+
 impl<'graph> JobGraph<'graph> {
     pub fn new() -> Self {
         JobGraph {
@@ -107,30 +112,54 @@ impl<'graph> JobGraph<'graph> {
                 dependencies: vec![],
             })
             .collect();
-        let mut last_mut = Vec::new();
-        last_mut.resize(self.resources.len(), None);
+        let mut last_accesses = Vec::new();
+        last_accesses.resize_with(self.resources.len(), || LastAccess::Ref(None, Vec::new()));
         let mut root_jobs = Vec::new();
 
         for (i, job_node) in self.jobs.iter().enumerate() {
             let mut any_dependencies = false;
 
             for resource in &job_node.refs {
-                if let Some(job_index) = last_mut[resource.0] {
-                    let job_data: &mut JobData = &mut jobs[job_index];
-                    job_data.dependents.push(i);
-                    any_dependencies = true;
-                    jobs[i].dependencies.push(job_index);
+                let last_access = &mut last_accesses[resource.0];
+                match last_access {
+                    LastAccess::Ref(mut_job_index, ref_job_indices) => {
+                        if let Some(job_index) = *mut_job_index {
+                            any_dependencies = true;
+                            jobs[i].dependencies.push(job_index);
+                            jobs[job_index].dependents.push(i);
+                        }
+                        ref_job_indices.push(i);
+                    }
+                    LastAccess::Mut(mut_job_index) => {
+                        any_dependencies = true;
+                        let mut_job_index = *mut_job_index;
+                        jobs[i].dependencies.push(mut_job_index);
+                        jobs[mut_job_index].dependents.push(i);
+                        *last_access = LastAccess::Ref(Some(mut_job_index), Vec::new());
+                    }
                 }
             }
 
             for resource in &job_node.muts {
-                if let Some(job_index) = last_mut[resource.0] {
-                    let job_data: &mut JobData = &mut jobs[job_index];
-                    job_data.dependents.push(i);
-                    any_dependencies = true;
-                    jobs[i].dependencies.push(job_index);
+                let last_access = &mut last_accesses[resource.0];
+                match last_access {
+                    LastAccess::Ref(_, ref_job_indices) => {
+                        if ref_job_indices.len() > 0 {
+                            any_dependencies = true;
+                        }
+                        for ref_job_index in ref_job_indices.iter().copied() {
+                            jobs[i].dependencies.push(ref_job_index);
+                            jobs[ref_job_index].dependents.push(i);
+                        }
+                    }
+                    LastAccess::Mut(mut_job_index) => {
+                        any_dependencies = true;
+                        let mut_job_index = *mut_job_index;
+                        jobs[i].dependencies.push(mut_job_index);
+                        jobs[mut_job_index].dependents.push(i);
+                    }
                 }
-                last_mut[resource.0] = Some(i);
+                *last_access = LastAccess::Mut(i);
             }
 
             if !any_dependencies {
@@ -352,6 +381,7 @@ mod tests {
                 r3.push(11);
             });
 
+        // Should depend on Job 1
         job_graph
             .add_job("Job 2")
             .with_ref(r1)
@@ -361,11 +391,13 @@ mod tests {
                 r2.extend_from_slice(r1);
             });
 
+        // Should depend on Job 1
         job_graph.add_job("Job 3").with_ref(r1).schedule(move |r1| {
             println!("Job 3");
             println!("r1: {:?}", r1);
         });
 
+        // Should depend on Job 1 and Job 2
         job_graph
             .add_job("Job 4")
             .with_ref(r2)
@@ -374,6 +406,16 @@ mod tests {
                 println!("Job 4");
                 println!("r2: {:?}", r2);
                 println!("r3: {:?}", r3);
+            });
+
+        // Should depend on Job 1 and Job 2
+        job_graph
+            .add_job("Job 5")
+            .with_ref(r1)
+            .with_ref(r2)
+            .with_ref(r3)
+            .schedule(move |_, _, _| {
+                println!("Job 5");
             });
 
         job_graph.run();
