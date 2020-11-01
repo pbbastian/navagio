@@ -3,7 +3,7 @@ mod job_builder;
 use crossbeam::{queue::ArrayQueue, thread};
 use std::{
     marker::PhantomData,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 pub use job_builder::*;
@@ -56,6 +56,12 @@ enum LastAccess {
     Mut(usize),
 }
 
+static ABORTED: AtomicBool = AtomicBool::new(false);
+
+pub fn abort() {
+    ABORTED.store(true, Ordering::SeqCst);
+}
+
 impl<'graph> JobGraph<'graph> {
     pub fn new() -> Self {
         JobGraph {
@@ -86,7 +92,7 @@ impl<'graph> JobGraph<'graph> {
     }
 
     pub fn run(mut self) {
-        let mut jobs: Vec<_> = self
+        let mut jobs: Vec<JobData> = self
             .jobs
             .iter_mut()
             .map(|job_node| JobData {
@@ -100,69 +106,75 @@ impl<'graph> JobGraph<'graph> {
         last_accesses.resize_with(self.resources.len(), || LastAccess::Ref(None, Vec::new()));
         let mut root_jobs = Vec::new();
 
-        for (i, job_node) in self.jobs.iter().enumerate() {
-            let mut any_dependencies = false;
+        let mut counters: Vec<AtomicUsize> = vec![];
 
-            for resource in &job_node.refs {
-                let last_access = &mut last_accesses[resource.0];
-                match last_access {
-                    LastAccess::Ref(mut_job_index, ref_job_indices) => {
-                        if let Some(job_index) = *mut_job_index {
-                            any_dependencies = true;
-                            jobs[i].dependencies.push(job_index);
-                            jobs[job_index].dependents.push(i);
+        for iteration in 0..2 {
+            for (i, job_node) in self.jobs.iter().enumerate() {
+                let mut any_dependencies = false;
+
+                for resource in &job_node.refs {
+                    let last_access = &mut last_accesses[resource.0];
+                    match last_access {
+                        LastAccess::Ref(mut_job_index, ref_job_indices) => {
+                            if let Some(job_index) = *mut_job_index {
+                                any_dependencies = true;
+                                jobs[i].dependencies.push(job_index);
+                                jobs[job_index].dependents.push(i);
+                            }
+                            ref_job_indices.push(i);
                         }
-                        ref_job_indices.push(i);
+                        LastAccess::Mut(mut_job_index) => {
+                            any_dependencies = true;
+                            let mut_job_index = *mut_job_index;
+                            jobs[i].dependencies.push(mut_job_index);
+                            jobs[mut_job_index].dependents.push(i);
+                            *last_access = LastAccess::Ref(Some(mut_job_index), Vec::new());
+                        }
                     }
-                    LastAccess::Mut(mut_job_index) => {
-                        any_dependencies = true;
-                        let mut_job_index = *mut_job_index;
-                        jobs[i].dependencies.push(mut_job_index);
-                        jobs[mut_job_index].dependents.push(i);
-                        *last_access = LastAccess::Ref(Some(mut_job_index), Vec::new());
+                }
+
+                for resource in &job_node.muts {
+                    let last_access = &mut last_accesses[resource.0];
+                    match last_access {
+                        LastAccess::Ref(_, ref_job_indices) => {
+                            if ref_job_indices.len() > 0 {
+                                any_dependencies = true;
+                            }
+                            for ref_job_index in ref_job_indices.iter().copied() {
+                                jobs[i].dependencies.push(ref_job_index);
+                                jobs[ref_job_index].dependents.push(i);
+                            }
+                        }
+                        LastAccess::Mut(mut_job_index) => {
+                            any_dependencies = true;
+                            let mut_job_index = *mut_job_index;
+                            jobs[i].dependencies.push(mut_job_index);
+                            jobs[mut_job_index].dependents.push(i);
+                        }
                     }
+                    *last_access = LastAccess::Mut(i);
+                }
+
+                if iteration == 0 && !any_dependencies {
+                    root_jobs.push(i);
                 }
             }
 
-            for resource in &job_node.muts {
-                let last_access = &mut last_accesses[resource.0];
-                match last_access {
-                    LastAccess::Ref(_, ref_job_indices) => {
-                        if ref_job_indices.len() > 0 {
-                            any_dependencies = true;
-                        }
-                        for ref_job_index in ref_job_indices.iter().copied() {
-                            jobs[i].dependencies.push(ref_job_index);
-                            jobs[ref_job_index].dependents.push(i);
-                        }
-                    }
-                    LastAccess::Mut(mut_job_index) => {
-                        any_dependencies = true;
-                        let mut_job_index = *mut_job_index;
-                        jobs[i].dependencies.push(mut_job_index);
-                        jobs[mut_job_index].dependents.push(i);
-                    }
-                }
-                *last_access = LastAccess::Mut(i);
+            for job in &mut jobs {
+                job.dependents.sort();
+                job.dependents.dedup();
+
+                job.dependencies.sort();
+                job.dependencies.dedup();
             }
 
-            if !any_dependencies {
-                root_jobs.push(i);
+            if iteration == 0 {
+                counters = jobs
+                    .iter()
+                    .map(|j| AtomicUsize::new(j.dependencies.len()))
+                    .collect();
             }
         }
-
-        for job in &mut jobs {
-            job.dependents.sort();
-            job.dependents.dedup();
-
-            job.dependencies.sort();
-            job.dependencies.dedup();
-        }
-
-        let counters: Vec<_> = jobs
-            .iter()
-            .map(|j| AtomicUsize::new(j.dependencies.len()))
-            .collect();
 
         root_jobs.sort();
         root_jobs.dedup();
@@ -178,33 +190,30 @@ impl<'graph> JobGraph<'graph> {
 
         let queue = &queue;
         let jobs = &jobs;
-        let num_remaining = AtomicUsize::new(root_jobs.len());
 
         thread::scope(|s| {
-            for _i in 0..thread_count {
-                let num_remaining = &num_remaining;
+            for thread_index in 0..thread_count {
                 let counters = &counters;
                 s.spawn(move |_| {
-                    while num_remaining.load(Ordering::SeqCst) > 0 {
+                    while !ABORTED.load(Ordering::SeqCst) {
                         if let Ok(job_index) = queue.pop() {
                             let job = &jobs[job_index];
                             let f = unsafe { job.f.as_mut().unwrap() };
                             f();
+                            counters[job_index].store(job.dependencies.len(), Ordering::SeqCst);
                             for dependent in job.dependents.iter().copied() {
                                 println!(
-                                    "[job graph] \"{}\" decrementing counter for \"{}\"",
-                                    jobs[job_index].name, jobs[dependent].name
+                                    "[job graph] [t{}] \"{}\" decrementing counter for \"{}\"",
+                                    thread_index, jobs[job_index].name, jobs[dependent].name
                                 );
                                 if counters[dependent].fetch_sub(1, Ordering::SeqCst) == 1 {
                                     println!(
-                                        "[job graph] \"{}\" scheduling job \"{}\"",
-                                        jobs[job_index].name, jobs[dependent].name
+                                        "[job graph] [t{}] \"{}\" scheduling job \"{}\"",
+                                        thread_index, jobs[job_index].name, jobs[dependent].name
                                     );
-                                    num_remaining.fetch_add(1, Ordering::SeqCst);
                                     queue.push(dependent).unwrap();
                                 }
                             }
-                            num_remaining.fetch_sub(1, Ordering::SeqCst);
                         }
                     }
                 });
@@ -272,13 +281,18 @@ mod tests {
             });
 
         // Should depend on Job 1 and Job 2
+        let mut iteration = 0;
         job_graph
             .add_job("Job 5")
             .with_ref(r1)
             .with_ref(r2)
             .with_ref(r3)
             .schedule(move |_, _, _| {
+                if iteration == 1 {
+                    abort();
+                }
                 println!("Job 5");
+                iteration += 1;
             });
 
         job_graph.run();
