@@ -1,4 +1,4 @@
-mod job_builder;
+mod builder;
 
 use crossbeam::{queue::ArrayQueue, thread};
 use std::{
@@ -6,7 +6,7 @@ use std::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-pub use job_builder::*;
+pub use builder::*;
 
 #[derive(Copy, Clone)]
 struct ResourceHandle(usize);
