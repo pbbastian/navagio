@@ -25,48 +25,43 @@ fn main() {
     let event_count = Arc::new(AtomicUsize::new(0));
 
     {
-        let mut event_queue = event_queue.clone();
-        let mut event_count = event_count.clone();
-        let mut input = WinitInputHelper::new();
-        // TODO: JobGraph should return a join handle instead
-        thread::spawn(move || {
-            let mut job_graph = JobGraph::new();
-            let event_queue = job_graph.add_resource("Event Queue", &mut event_queue);
-            let event_count = job_graph.add_resource("Event Count", &mut event_count);
-            let input = job_graph.add_resource("Input", &mut input);
+        let mut job_graph = JobGraph::new();
+        let event_queue = job_graph.add_resource("Event Queue", event_queue.clone());
+        let event_count = job_graph.add_resource("Event Count", event_count.clone());
+        let input = job_graph.add_resource("Input", WinitInputHelper::new());
 
-            let mut did_update_last_frame = false;
-            job_graph
-                .add_job("Poll Events")
-                .with_ref(event_queue)
-                .with_ref(event_count)
-                .with_mut(input)
-                .schedule(move |event_queue, event_count, input| {
-                    let count = event_count.swap(0, Ordering::SeqCst);
-                    if count > 0 {
-                        for _ in 0..count {
-                            let event = event_queue.pop().unwrap();
-                            input.update(&event);
-                        }
-                        did_update_last_frame = true;
-                    } else if did_update_last_frame {
-                        // Fake events to clear state so that we don't get repeated inputs.
-                        let event: Event<()> = Event::NewEvents(winit::event::StartCause::Poll);
+        let mut did_update_last_frame = false;
+        job_graph
+            .add_job("Poll Events")
+            .with_ref(event_queue)
+            .with_ref(event_count)
+            .with_mut(input)
+            .schedule(move |event_queue, event_count, input| {
+                let count = event_count.swap(0, Ordering::SeqCst);
+                if count > 0 {
+                    for _ in 0..count {
+                        let event = event_queue.pop().unwrap();
                         input.update(&event);
-                        let event: Event<()> = Event::MainEventsCleared;
-                        input.update(&event);
-                        did_update_last_frame = false;
                     }
-                });
-
-            job_graph.add_job("If Q").with_ref(input).schedule(|input| {
-                if input.key_pressed(winit::event::VirtualKeyCode::Q) {
-                    info!("Q was pressed!");
+                    did_update_last_frame = true;
+                } else if did_update_last_frame {
+                    // Fake events to clear state so that we don't get repeated inputs.
+                    let event: Event<()> = Event::NewEvents(winit::event::StartCause::Poll);
+                    input.update(&event);
+                    let event: Event<()> = Event::MainEventsCleared;
+                    input.update(&event);
+                    did_update_last_frame = false;
                 }
             });
 
-            job_graph.run();
+        job_graph.add_job("If Q").with_ref(input).schedule(|input| {
+            if input.key_pressed(winit::event::VirtualKeyCode::Q) {
+                info!("Q was pressed!");
+            }
         });
+
+        // TODO: JobGraph should return a join handle instead
+        thread::spawn(move || job_graph.run());
     }
 
     let event_queue = event_queue.clone();

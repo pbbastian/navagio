@@ -3,6 +3,7 @@ mod builder;
 use crossbeam::{queue::ArrayQueue, thread};
 use log::{debug, trace};
 use std::{
+    any::Any,
     marker::PhantomData,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
@@ -29,6 +30,7 @@ impl<'graph, T: Sync> Copy for Resource<'graph, T> {}
 pub struct JobGraph<'graph> {
     jobs: Vec<JobNode<'graph>>,
     resources: Vec<ResourceNode<'graph>>,
+    boxes: Vec<Box<dyn Any + Sync + Send>>,
 }
 
 struct JobNode<'a> {
@@ -68,6 +70,7 @@ impl<'graph> JobGraph<'graph> {
         JobGraph {
             jobs: vec![],
             resources: vec![],
+            boxes: vec![],
         }
     }
 
@@ -78,7 +81,7 @@ impl<'graph> JobGraph<'graph> {
         new_builder(self, name)
     }
 
-    pub fn add_resource<T: Sync>(
+    pub fn add_ext_resource<T: Sync>(
         &mut self,
         name: &'graph str,
         resource: &'graph mut T,
@@ -90,6 +93,22 @@ impl<'graph> JobGraph<'graph> {
             ptr: resource,
             phantom: Default::default(),
         }
+    }
+
+    pub fn add_resource<T>(&mut self, name: &'graph str, resource: T) -> Resource<'graph, T>
+    where
+        T: Sync + Send + 'static,
+    {
+        let handle = ResourceHandle(self.resources.len());
+        self.resources.push(ResourceNode { _name: name });
+        let mut b = Box::new(resource);
+        let r = Resource {
+            handle,
+            ptr: b.as_mut(),
+            phantom: Default::default(),
+        };
+        self.boxes.push(b);
+        r
     }
 
     pub fn run(mut self) {
@@ -258,14 +277,12 @@ mod tests {
     #[test]
     fn it_works() {
         SimpleLogger::new().init().unwrap();
-        let mut numbers = vec![1, 2, 3];
         let mut other_numbers = vec![7, 8, 9];
-        let mut more_numbers = vec![4, 5, 6];
         let mut job_graph = JobGraph::new();
 
-        let r1 = job_graph.add_resource("Numbers", &mut numbers);
-        let r2 = job_graph.add_resource("Other numbers", &mut other_numbers);
-        let r3 = job_graph.add_resource("More numbers", &mut more_numbers);
+        let r1 = job_graph.add_resource("Numbers", vec![1, 2, 3]);
+        let r2 = job_graph.add_ext_resource("Other numbers", &mut other_numbers);
+        let r3 = job_graph.add_resource("More numbers", vec![4, 5, 6]);
 
         job_graph
             .add_job("Job 1")
