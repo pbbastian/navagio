@@ -77,7 +77,7 @@ impl<'graph> JobGraph<'graph> {
         new_builder(self, name)
     }
 
-    pub fn add_resource<T: Sync + Clone>(
+    pub fn add_resource<T: Sync>(
         &mut self,
         name: &'graph str,
         resource: &'graph mut T,
