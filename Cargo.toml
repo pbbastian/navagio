@@ -7,5 +7,10 @@ edition = "2018"
 [dependencies]
 crossbeam = "0.7.3"
 num_cpus = "1.13.0"
+cocoa = "0.24.0"
+metal = "0.20.0"
+objc = "0.2.7"
+winit = "0.23.0"
+winit_input_helper = "0.8.0"
 log = { version = "0.4.11", features = ["max_level_debug", "release_max_level_warn"] }
 simple_logger = "1.11.0"
