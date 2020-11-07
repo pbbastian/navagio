@@ -128,7 +128,7 @@ impl<'graph> JobGraph<'graph> {
                             let mut_job_index = *mut_job_index;
                             jobs[i].dependencies.push(mut_job_index);
                             jobs[mut_job_index].dependents.push(i);
-                            *last_access = LastAccess::Ref(Some(mut_job_index), Vec::new());
+                            *last_access = LastAccess::Ref(Some(mut_job_index), vec![i]);
                         }
                     }
                 }
