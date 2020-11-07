@@ -1,6 +1,7 @@
 mod builder;
 
 use crossbeam::{queue::ArrayQueue, thread};
+use log::{debug, trace};
 use std::{
     marker::PhantomData,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -179,12 +180,27 @@ impl<'graph> JobGraph<'graph> {
         root_jobs.sort();
         root_jobs.dedup();
 
+        for job in &jobs {
+            debug!(target: "job_graph", "[{}]", job.name);
+            debug!(target: "job_graph", "Dependencies:");
+            for index in &job.dependencies {
+                let dependency = &jobs[*index];
+                debug!(target: "job_graph", "  {}", dependency.name);
+            }
+            debug!(target: "job_graph", "Dependents:");
+            for index in &job.dependents {
+                let dependent = &jobs[*index];
+                debug!(target: "job_graph", "  {}", dependent.name);
+            }
+            debug!(target: "job_graph", "");
+        }
+
         let thread_count = num_cpus::get();
-        println!("[job graph] Spawning {} threads", thread_count);
+        debug!(target: "job_graph", "Spawning {} threads", thread_count);
 
         let queue = ArrayQueue::new(65_536);
         for index in root_jobs.iter().copied() {
-            println!("[job graph] Scheduling root \"{}\"", jobs[index].name);
+            trace!(target: "job_graph", "Scheduling root \"{}\"", jobs[index].name);
             queue.push(index).unwrap();
         }
 
@@ -198,17 +214,21 @@ impl<'graph> JobGraph<'graph> {
                     while !ABORTED.load(Ordering::SeqCst) {
                         if let Ok(job_index) = queue.pop() {
                             let job = &jobs[job_index];
+                            trace!(target: "job_graph",
+                                "[t{}] Running job \"{}\"",
+                                thread_index, jobs[job_index].name
+                            );
                             let f = unsafe { job.f.as_mut().unwrap() };
                             f();
                             counters[job_index].store(job.dependencies.len(), Ordering::SeqCst);
                             for dependent in job.dependents.iter().copied() {
-                                println!(
-                                    "[job graph] [t{}] \"{}\" decrementing counter for \"{}\"",
+                                trace!(target: "job_graph",
+                                    "[t{}] \"{}\" decrementing counter for \"{}\"",
                                     thread_index, jobs[job_index].name, jobs[dependent].name
                                 );
                                 if counters[dependent].fetch_sub(1, Ordering::SeqCst) == 1 {
-                                    println!(
-                                        "[job graph] [t{}] \"{}\" scheduling job \"{}\"",
+                                    trace!(target: "job_graph",
+                                        "[t{}] \"{}\" scheduling job \"{}\"",
                                         thread_index, jobs[job_index].name, jobs[dependent].name
                                     );
                                     queue.push(dependent).unwrap();
@@ -225,6 +245,9 @@ impl<'graph> JobGraph<'graph> {
 
 #[cfg(test)]
 mod tests {
+    use log::info;
+    use simple_logger::SimpleLogger;
+
     use super::*;
 
     #[test]
@@ -234,6 +257,7 @@ mod tests {
 
     #[test]
     fn it_works() {
+        SimpleLogger::new().init().unwrap();
         let mut numbers = vec![1, 2, 3];
         let mut other_numbers = vec![7, 8, 9];
         let mut more_numbers = vec![4, 5, 6];
@@ -248,7 +272,6 @@ mod tests {
             .with_mut(r1)
             .with_mut(r3)
             .schedule(move |r1, r3| {
-                println!("Job 1");
                 r1.push(10);
                 r3.push(11);
             });
@@ -259,14 +282,12 @@ mod tests {
             .with_ref(r1)
             .with_mut(r2)
             .schedule(move |r1, r2| {
-                println!("Job 2");
                 r2.extend_from_slice(r1);
             });
 
         // Should depend on Job 1
         job_graph.add_job("Job 3").with_ref(r1).schedule(move |r1| {
-            println!("Job 3");
-            println!("r1: {:?}", r1);
+            info!("r1: {:?}", r1);
         });
 
         // Should depend on Job 1 and Job 2
@@ -275,9 +296,8 @@ mod tests {
             .with_ref(r2)
             .with_ref(r3)
             .schedule(move |r2, r3| {
-                println!("Job 4");
-                println!("r2: {:?}", r2);
-                println!("r3: {:?}", r3);
+                info!("r2: {:?}", r2);
+                info!("r3: {:?}", r3);
             });
 
         // Should depend on Job 1 and Job 2
@@ -288,10 +308,10 @@ mod tests {
             .with_ref(r2)
             .with_ref(r3)
             .schedule(move |_, _, _| {
-                if iteration == 1 {
+                if iteration == 3 {
+                    info!("Reached iteration 3, aborting");
                     abort();
                 }
-                println!("Job 5");
                 iteration += 1;
             });
 
